@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 mpl.rcParams.update(mpl.rcParamsDefault)
 import numpy as np
+from scipy import signal
 import os
 import warnings
 
@@ -87,10 +88,10 @@ typeStr = "BR"
 
 # recIDList = ["S0"+str(i) for i in range(27,75+1)] # plot all patients
 recIDList = ["S070"] # plot just one
-# recIDList = np.setdiff1d(recIDList,["S028","S032"]) # to exclude certain patients
 
 saveFig = False
-doCut = True
+doClockBasedCut = True
+doMotionParamThr = True
 
 # Read dictionary pkl file
 for recID in recIDList:
@@ -188,33 +189,77 @@ for recID in recIDList:
         timeStarts = timeStarts[:len(radarData)]
 
     # if you want to cut the data and also have the stats reflect that:
-    if doCut:
-        if hF.perSubjCuts()[recID][0] > 0:
-            cutStartInd = np.argmin(np.abs(hF.perSubjCuts()[recID][0] - timeStarts)) + 1
-        else:
-            cutStartInd = 0
+    if doClockBasedCut:
+        nightClock = [22,0,0]
+        nightClock_sec = hF.convertTimeStamp(nightClock)
+        if recID != 'S048':
+            morningClock = [6+24,0,0] # add 24h because its next day
+        elif recID == 'S048': # S048 terminated early 
+            morningClock = [3+24,30,0] # add 24h because its next day
+        morningClock_sec = hF.convertTimeStamp(morningClock)
 
-        if np.isinf(hF.perSubjCuts()[recID][1]):
-            cutEndInd = len(timeStarts)
-        else:
-            cutEndInd = np.argmin(np.abs(hF.perSubjCuts()[recID][1] - timeStarts)) + 1
+        nightClock_sec_afterRecStart = nightClock_sec - hF.convertTimeStamp(hF.perSubjStartClocks()[recID]) # recordings always started before 22:00
+        morningClock_sec_afterRecStart = morningClock_sec - hF.convertTimeStamp(hF.perSubjStartClocks()[recID])
+
+        inds2use = (timeStarts >= nightClock_sec_afterRecStart) & (timeStarts <= morningClock_sec_afterRecStart)
+        bestBins = bestBins[:,inds2use]
+        radarData = radarData[inds2use]
+        psgData = psgData[inds2use]
+        timeStarts = timeStarts[inds2use]
+
+    # adding motion parameter based removal of epochs
+    if doMotionParamThr:
+        analysisResSaveFile = f"recID{recID}_motionParam.pkl"
+        saveDirPath = hF.giveSaveFilePath() + "motionParam_win60s_step5s//"
         
-        bestBins = bestBins[:,cutStartInd:cutEndInd]
-        radarData = radarData[cutStartInd:cutEndInd]
-        psgData = psgData[cutStartInd:cutEndInd]
-        timeStarts = timeStarts[cutStartInd:cutEndInd]
+        analysisResSaveFile = saveDirPath + analysisResSaveFile
+
+        with open(analysisResSaveFile, 'rb') as fp:
+            motionParamSaveDict = pickle.load(fp)
+
+        motionParam_timestamps = motionParamSaveDict['timeStarts']
+        motionParam = motionParamSaveDict['motionParameter']
+
+        if doClockBasedCut:
+            inds2use = (motionParam_timestamps >= nightClock_sec_afterRecStart) & (motionParam_timestamps <= morningClock_sec_afterRecStart)
+            motionParam_timestamps = motionParam_timestamps[inds2use]
+            motionParam = motionParam[inds2use]
+
+       
+        # compare the timestarts from the vital rate result, cut them to match if they dont
+        if motionParam_timestamps[-1] != timeStarts[-1]:
+            if motionParam_timestamps[-1] > timeStarts[-1]:
+                motionParam = motionParam[motionParam_timestamps <= timeStarts[-1]]
+                motionParam_timestamps = motionParam_timestamps[motionParam_timestamps <= timeStarts[-1]]
+            elif motionParam_timestamps[-1] < timeStarts[-1]:
+                bestBins = bestBins[:,timeStarts <= motionParam_timestamps[-1]]
+                radarData = radarData[timeStarts <= motionParam_timestamps[-1]]
+                psgData = psgData[timeStarts <= motionParam_timestamps[-1]]
+                timeStarts = timeStarts[timeStarts <= motionParam_timestamps[-1]]
+
+        # smoothing
+        k = (5*60) // 5 # 60s win 5s step
+        motionParam = signal.filtfilt(np.ones(k)/k,1, motionParam)
+
+        motionParamThr = np.nanmean(motionParam)
 
     ###########################################
     # Code for creating the plot
 
-    mae = np.nanmean(np.abs(psgData - radarData))
-    winsWithBoth = len(np.where((~np.isnan(radarData)) & (~np.isnan(psgData)))[0])
+    if doMotionParamThr:
+        inds2use = motionParam < motionParamThr
+    else:
+        inds2use = np.full(len(timeStarts), True)
+    
+    mae = np.nanmean(np.abs(psgData[inds2use] - radarData[inds2use]))
+    winsWithBoth = len(np.where((~np.isnan(radarData[inds2use])) & (~np.isnan(psgData[inds2use])))[0])
     if winsWithBoth > 0:
-        mape = (1/winsWithBoth) * np.nansum(np.abs(psgData - radarData) / np.abs(psgData)) * 100
+        mape = (1/winsWithBoth) * np.nansum(np.abs(psgData[inds2use] - radarData[inds2use]) / np.abs(psgData[inds2use])) * 100
     else:
         mape = np.nan
 
-    diffStd = np.nanstd(np.abs(psgData - radarData))
+    diffStd = np.nanstd(np.abs(psgData[inds2use] - radarData[inds2use]))
+
 
     print(f'\n----------------------------\nShowing recID {recID}:\n----------------------------')
 
@@ -245,8 +290,21 @@ for recID in recIDList:
         ax[0].set_ylabel('Heart rate [1/min]')
         ax[0].set_ylim([40,120])
 
-    ax[0].legend(loc="upper right")
     ax[0].grid(visible=True, which='major', axis='y')
+
+    if doMotionParamThr:
+        # Shade regions where y > threshold
+        ax[0].fill_between(
+            x=motionParam_timestamps,
+            y1=ax[0].get_ylim()[0],
+            y2=ax[0].get_ylim()[1],
+            where=(motionParam > motionParamThr),
+            alpha=0.3,
+            color="grey",
+            label="Excessive motion"
+        )
+    
+    ax[0].legend(loc="upper right")
 
     ax[1].plot(timeStarts, psgData - radarData,'o',markersize=3,fillstyle="none",label=f"PSG - Radar")
     ax[1].plot([timeStarts[0],timeStarts[-1]+timeWinLen],[0,0],'k--',label="Diff = 0")
@@ -266,10 +324,30 @@ for recID in recIDList:
     if any(outOfBoundsBot):
         ax[1].plot(timeStarts[outOfBoundsBot],np.zeros(len(outOfBoundsBot))-4.7,'rv',label="Diff < -5")
 
+    if doMotionParamThr:
+        ax[1].fill_between(
+            x=motionParam_timestamps,
+            y1=ax[1].get_ylim()[0],
+            y2=ax[1].get_ylim()[1],
+            where=(motionParam > motionParamThr),
+            alpha=0.3,
+            color="grey"
+        )
+
     ax[1].legend(loc="upper right")
     ax[1].set_yticks(np.arange(-4,5))
     ax[1].grid(visible=True, which='major', axis='y')
     
+    if doMotionParamThr:
+        ax[2].fill_between(
+            x=motionParam_timestamps,
+            y1=bins2check[0]*.05-.025,
+            y2=bins2check[-1]*.05+.025,
+            where=(motionParam > motionParamThr),
+            alpha=0.5,
+            color="grey"
+        )
+
     cax = ax[2].matshow(bestBins, extent=[timeStarts[0]-timeWinLen//2, timeStarts[-1]+timeWinLen//2, bins2check[0]*.05-.025, bins2check[-1]*.05+.025], aspect='auto', origin='lower', cmap='plasma')
     ax[2].xaxis.set_ticks_position('bottom')
     ax[2].set_xlabel('Time [s]')

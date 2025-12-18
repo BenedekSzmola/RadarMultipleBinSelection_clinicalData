@@ -4,9 +4,14 @@ __Contact:__ benedek.ernoe.szmola@uni-oldenburg.de
 
 This repository contains the scripts which were used for the analyses presented in the manuscript. The scripts to make the plots are also included.
 
+## Updates:
+- Update 1 18.12.2025
+    - This repository has now been updated according to the revisions to the paper.
+
 ## Description of scripts
 - _MBS\_....py_ - these scripts are for the multiple bin selection
 - _SBS\_....py_ - these scripts are for the single bin selection
+- _compute\_motion\_param.py_ - this script computes the doppler FFT based motion parameter
 - the other scripts are for plotting, statistics computation, or they store parameters  
 
 ## Usage
@@ -22,6 +27,9 @@ This repository contains the scripts which were used for the analyses presented 
 ### Computing breathing and heart rate
 - _MBS\_main.py_ and _SBS\_main.py_ have both a main function which executes the breathing and heart rate computation using multiple and single range bin selection respectively
     - The parameters which were used for the manuscript are set as defaults in the function definition. Just execute the functions without specifying any of the parameters.
+
+### Computing the motion parameter
+- This script does not have a main function, just execute the script to get the results.
 
 ### Computing statistics, creating plots
 For all of the below scripts, find the _recIDList_ variable to set which patients you want to include in the stats/plots

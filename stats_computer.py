@@ -8,7 +8,7 @@ The script expects saved .pkl result files in a configured directory.
 
 import pickle
 import numpy as np
-from scipy import stats
+from scipy import stats,signal
 import os
 import copy
 
@@ -33,9 +33,9 @@ xtraTag = ""
 
 # recIDList = ["S0"+str(i) for i in range(27,75+1)] # plot all patients
 recIDList = ["S070"] # plot just one
-# recIDList = np.setdiff1d(recIDList,["S028","S032"]) # to exclude certain patients
 
-doCut = True
+doClockBasedCut = True
+doMotionParamThr = True
 
 # Read dictionary pkl file
 allResultsDict = {}
@@ -163,21 +163,63 @@ for rInd,recID in enumerate(recIDList):
     psgData[psgData == 0]     = np.nan
 
     # if you want to cut the data and also have the stats reflect that:
-    if doCut:
-        if hF.perSubjCuts()[recID][0] > 0:
-            cutStartInd = np.argmin(np.abs(hF.perSubjCuts()[recID][0] - timeStarts)) + 1
-        else:
-            cutStartInd = 0
+    if doClockBasedCut:
+        nightClock = [22,0,0]
+        nightClock_sec = hF.convertTimeStamp(nightClock)
+        if recID != 'S048':
+            morningClock = [6+24,0,0] # add 24h because its next day
+        elif recID == 'S048': # S048 terminated early 
+            morningClock = [3+24,30,0] # add 24h because its next day
+        morningClock_sec = hF.convertTimeStamp(morningClock)
 
-        if np.isinf(hF.perSubjCuts()[recID][1]):
-            cutEndInd = len(timeStarts)
-        else:
-            cutEndInd = np.argmin(np.abs(hF.perSubjCuts()[recID][1] - timeStarts)) + 1
+        nightClock_sec_afterRecStart = nightClock_sec - hF.convertTimeStamp(hF.perSubjStartClocks()[recID]) # recordings always started before 22:00
+        morningClock_sec_afterRecStart = morningClock_sec - hF.convertTimeStamp(hF.perSubjStartClocks()[recID])
+
+        inds2use = (timeStarts >= nightClock_sec_afterRecStart) & (timeStarts <= morningClock_sec_afterRecStart)
+        bestBins = bestBins[:,inds2use]
+        radarData = radarData[inds2use]
+        psgData = psgData[inds2use]
+        timeStarts = timeStarts[inds2use]
+
+    if doMotionParamThr:
+        analysisResSaveFile = f"recID{recID}_motionParam.pkl"
+        saveDirPath = hF.giveSaveFilePath() + "motionParam_win60s_step5s//"
         
-        bestBins = bestBins[:,cutStartInd:cutEndInd]
-        radarData = radarData[cutStartInd:cutEndInd]
-        psgData = psgData[cutStartInd:cutEndInd]
-        timeStarts = timeStarts[cutStartInd:cutEndInd]
+        analysisResSaveFile = saveDirPath + analysisResSaveFile
+
+        with open(analysisResSaveFile, 'rb') as fp:
+            motionParamSaveDict = pickle.load(fp)
+
+        motionParam_timestamps = motionParamSaveDict['timeStarts']
+        motionParam = motionParamSaveDict['motionParameter']
+
+        if doClockBasedCut:
+            inds2use = (motionParam_timestamps >= nightClock_sec_afterRecStart) & (motionParam_timestamps <= morningClock_sec_afterRecStart)
+            motionParam_timestamps = motionParam_timestamps[inds2use]
+            motionParam = motionParam[inds2use]
+
+        # compare the timestarts from the vital rate result, cut them to match if they dont
+        if motionParam_timestamps[-1] != timeStarts[-1]:
+            if motionParam_timestamps[-1] > timeStarts[-1]:
+                motionParam = motionParam[motionParam_timestamps <= timeStarts[-1]]
+                motionParam_timestamps = motionParam_timestamps[motionParam_timestamps <= timeStarts[-1]]
+            elif motionParam_timestamps[-1] < timeStarts[-1]:
+                bestBins = bestBins[:,timeStarts <= motionParam_timestamps[-1]]
+                radarData = radarData[timeStarts <= motionParam_timestamps[-1]]
+                psgData = psgData[timeStarts <= motionParam_timestamps[-1]]
+                timeStarts = timeStarts[timeStarts <= motionParam_timestamps[-1]]
+
+        # smoothing
+        k = (5*60) // 5 # 60s win 5s step
+        motionParam = signal.filtfilt(np.ones(k)/k,1, motionParam)
+
+        motionParamThr = np.nanmean(motionParam)
+        belowThr = motionParam < motionParamThr
+        
+        bestBins = bestBins[:,belowThr]
+        radarData = radarData[belowThr]
+        psgData = psgData[belowThr]
+        timeStarts = timeStarts[belowThr]
 
     if np.sum(np.isnan(psgData)) > (timeWinLen/timeStep):
         _,badIntervalLens = hF.intervalExtractor(np.where(np.isnan(psgData))[0])
@@ -204,6 +246,19 @@ for rInd,recID in enumerate(recIDList):
         bothValidIntervalLens = np.diff(bothValidIntervals, axis=1)
         bothValidIntervalSec += np.sum([timeWinLen + (leni-1)*timeStep for leni in bothValidIntervalLens])
     
+    consecutiveEpochs = np.where(np.diff(timeStarts) < (timeStep+1))[0]
+    consecutiveEpochsIntervals,consecutiveEpochsIntervalLens = hF.intervalExtractor(consecutiveEpochs)
+    if len(consecutiveEpochsIntervalLens) > 0:
+        consecutiveEpochsIntervals = consecutiveEpochs[consecutiveEpochsIntervals].astype("float")
+        for i in range(len(consecutiveEpochsIntervalLens)-1):
+            if (consecutiveEpochsIntervals[i+1,0] - consecutiveEpochsIntervals[i,1]) < (timeWinLen / timeStep):
+                consecutiveEpochsIntervals[i+1,0] = copy.deepcopy(consecutiveEpochsIntervals[i,0])
+                consecutiveEpochsIntervals[i,:] = np.nan
+
+        consecutiveEpochsIntervals = consecutiveEpochsIntervals[np.all(~np.isnan(consecutiveEpochsIntervals), axis=1),:]
+        consecutiveEpochsIntervalLens = np.diff(consecutiveEpochsIntervals, axis=1)
+        consecutiveEpochsIntervalSec = np.sum([timeWinLen + (leni-1)*timeStep for leni in consecutiveEpochsIntervalLens]) #np.sum(consecutiveEpochsIntervalLens) * timeStep
+    
     fullPsgData   = np.concatenate((fullPsgData,psgData))
     fullRadarData = np.concatenate((fullRadarData,radarData))
     if 'computeTimes' in resultsDict:
@@ -212,7 +267,7 @@ for rInd,recID in enumerate(recIDList):
     # how many timewindows had detected activity PSG & radar
     numWins            += len(timeStarts)
 
-    timeInSec          += timeStarts[-1] + timeWinLen - timeStarts[0]
+    timeInSec          += consecutiveEpochsIntervalSec
 
     winsWithPSG        += len(np.where(~np.isnan(psgData))[0])
 
@@ -280,9 +335,9 @@ recMins = minRem // 60
 recSecs = minRem % 60
 recDurStr = f"{recHours:.0f} hours, {recMins:.0f} minutes, {recSecs:.1f} seconds"
 print(f"Total number of time windows: {numWins} , with window length: {timeWinLen} s , step of {int(timeStep)} s , full duration analysed: {recDurStr}")
-print(f"Percent of windows with detected PSG {typeStr} activity: {100*winsWithPSG/numWins: .1f}% ({winsWithPSG} windows)")
-print(f"Percent of windows with detected Radar {typeStr} activity: {100*winsWithRadar/numWins: .1f}% ({winsWithRadar} windows)")
-print(f"Percent of windows with both PSG and Radar detected {typeStr} activity: {100*winsWithBoth/numWins: .1f}% ({winsWithBoth} windows)")
+print(f"Percent of windows with detected PSG {typeStr} activity: {100*winsWithPSG/numWins: .2f}% ({winsWithPSG} windows)")
+print(f"Percent of windows with detected Radar {typeStr} activity: {100*winsWithRadar/numWins: .2f}% ({winsWithRadar} windows)")
+print(f"Percent of windows with both PSG and Radar detected {typeStr} activity: {100*winsWithBoth/numWins: .2f}% ({winsWithBoth} windows)")
 bothValidH = bothValidIntervalSec // 3600
 minRem = bothValidIntervalSec % 3600
 bothValidMin = minRem // 60
@@ -314,11 +369,11 @@ print(f'Without Radar | {winsWithPsgNoRadar:8.0f} | {winsWithNeither:11.0f} ')
 print(f'---------------------------------------\n')
 
 print(f"Difference between PSG & Radar within +- {crtiDist}: {winsWithinCritDist} windows")
-print(f"    as proportion of time windows with both: {100*winsWithinCritDist/winsWithBoth: .1f}%")
-print(f"    as proportion of time windows with PSG:  {100*winsWithinCritDist/winsWithPSG: .1f}%")
-print(f"Difference between PSG & Radar within boundaries of uncertainty (+-{boundOfUncertain:.1f}): {winsRealClose} windows")
-print(f"    as proportion of time windows with both: {100*winsRealClose/winsWithBoth: .1f}%")
-print(f"    as proportion of time windows with PSG:  {100*winsRealClose/winsWithPSG: .1f}%")
+print(f"    as proportion of time windows with both: {100*winsWithinCritDist/winsWithBoth: .2f}%")
+print(f"    as proportion of time windows with PSG:  {100*winsWithinCritDist/winsWithPSG: .2f}%")
+print(f"Difference between PSG & Radar within boundaries of uncertainty (+-{boundOfUncertain:.2f}): {winsRealClose} windows")
+print(f"    as proportion of time windows with both: {100*winsRealClose/winsWithBoth: .2f}%")
+print(f"    as proportion of time windows with PSG:  {100*winsRealClose/winsWithPSG: .2f}%")
 print('')
 # MSE
 mse = np.nanmean((fullPsgData - fullRadarData)**2)
@@ -359,9 +414,9 @@ else:
 
     # Pearson correlation
     pearson_corr, pearson_p = stats.pearsonr(x_clean, y_clean)
-    print(f"\nPearson correlation: r = {pearson_corr:.3f}, p = {pearson_p:.3e}")
+    print(f"\nPearson correlation: r = {pearson_corr:.2f}, p = {pearson_p:.3e}")
 
     # Spearman correlation
     spearman_corr, spearman_p = stats.spearmanr(x_clean, y_clean)
-    print(f"Spearman correlation: ρ = {spearman_corr:.3f}, p = {spearman_p:.3e}")
+    print(f"Spearman correlation: ρ = {spearman_corr:.2f}, p = {spearman_p:.3e}")
 

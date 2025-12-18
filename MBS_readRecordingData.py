@@ -332,6 +332,220 @@ def readRadarMakeEpochs(radarSettings,measurement_data,radar_idx,srate,epochLen,
 
     return timestampEpochs,phaseEpochs,magnitudeEpochs,exactEpochStartTimestamps,np.round(exactEpochStartTimestamps-timestamps[0]).astype("int")
 
+def readRadarMakeDopplerEpochs(
+    radarSettings,
+    measurement_data,
+    radar_idx,
+    srate,
+    epochLen,
+    epochInput,
+    useHann=True,
+    parallelize=False,
+    parallel_workers=16,
+    parallel_blockLen=3000,
+    parallel_verboseLvl=50
+):
+    """
+    Read raw radar data and compute Doppler FFT spectra for time-aligned epochs.
+
+    This function extracts radar measurements, segments them into epochs
+    based on user-defined timing inputs, deinterleaves the raw ADC data into
+    complex samples, and computes range–Doppler representations using FFTs.
+    Epoch processing can be performed sequentially or in parallel for
+    improved performance on large datasets.
+
+    Args:
+        radarSettings (dict):
+            Dictionary containing radar configuration parameters. Expected
+            keys include (but are not limited to):
+            - 'radar_loop_num'
+            - 'radar_tx_num'
+            - 'radar_rx_num'
+            - 'radar_adcsamp_num'
+        measurement_data (list or tuple):
+            Container holding measurement data for all sensors. The element
+            at index `radar_idx` must be a tuple or list of the form
+            `(timestamps, rawInputData)`, where `timestamps` is a 1D array of
+            time values and `rawInputData` contains interleaved radar ADC data.
+        radar_idx (int):
+            Index specifying which radar measurement entry in
+            `measurement_data` to process.
+        srate (float):
+            Sampling rate of the radar measurements in Hz.
+        epochLen (float):
+            Length of each epoch in seconds.
+        epochInput (dict):
+            Dictionary defining how epochs are constructed. Supported formats:
+            - Time-based definition with keys:
+              `'timeStart'`, `'timeEnd'`, `'epochStepSize'`
+            - Explicit definition with key:
+              `'epochStarts'` (scalar or array of start times in seconds)
+        useHann (bool, optional):
+            If True, applies a Hann window in the fast-time (range) and
+            slow-time (Doppler) dimensions before FFT computation.
+            Default is True.
+        parallelize (bool, optional):
+            If True, epochs are processed in parallel using joblib.
+            Default is False.
+        parallel_workers (int, optional):
+            Number of worker processes to use when `parallelize` is True.
+            Default is 16.
+        parallel_blockLen (int, optional):
+            Number of epochs processed per parallel block. This limits memory
+            usage when processing long recordings. Default is 3000.
+        parallel_verboseLvl (int, optional):
+            Verbosity level passed to joblib's Parallel backend.
+            Default is 50.
+
+    Returns:
+        tuple:
+            A tuple containing:
+            - timestampEpochs (list of ndarray):
+                List of timestamp arrays, one per epoch.
+            - dopplerEpochs (list of ndarray):
+                List of Doppler power spectra (magnitude squared of FFT)
+                computed for each epoch.
+            - exactEpochStartTimestamps (ndarray):
+                Array of exact start timestamps (in seconds) for each epoch.
+            - epochStartSampleOffsets (ndarray):
+                Integer array of epoch start offsets in samples, relative to
+                the first radar timestamp.
+    """
+    def deinterleaveRadarData(rawInputData,TX,RX):
+        ## Deinterleaving the Radar Data
+        num_meas = rawInputData.shape[0]  # number of measurements in data. each subarray is one measurement in an interleaved int 16 format
+        data_raw = rawInputData.flatten()
+        data_raw = np.reshape(data_raw, (int(len(data_raw)/4),2,2)) # creates a 2x2 subarray 
+        data_raw = data_raw.transpose(0,2,1) #switches the places for data in the 2x2 array to revoke the interleaved structure
+        data_raw = np.reshape(data_raw,(len(data_raw)*2,2)) # reshapes everything into size 2 subarrays which represent real and imaginary part of the complex number
+        data_raw = data_raw.transpose() # transposes everything to get two large subarray. the first is every imaginary part and the seconds every real part
+        data_raw = 1j*data_raw[0] + data_raw[1] # combining real and imaginary parts for everything at once => array with complex numbers along the time axis
+        data_comp_all = np.reshape(data_raw, (num_meas,radarSettings['radar_loop_num'],radarSettings['radar_tx_num'],radarSettings['radar_rx_num'],radarSettings['radar_adcsamp_num'])) # reshaping complex numbers back to individual measurmements
+
+        ## Converting chirps to range representations
+        data_comp = data_comp_all[:,:,TX,RX]
+
+        return data_comp
+    
+    ## Radar        
+    TX = 0  # TX =  Transmitting Antenna -> We only dont use angle information here so we only use the same antenna configuration
+    RX = 0  # RX =  Receiving Antenna
+
+    epochLen_inSamples = int(np.floor(epochLen * srate))
+    
+    ## Extracting Radar data
+    timestamps = measurement_data[radar_idx][0]
+    rawInputData = measurement_data[radar_idx][1]
+
+    fullSamplesLen = len(timestamps)
+    measLenInSec = timestamps[-1] - timestamps[0]
+    
+    if 'timeStart' in epochInput:
+        timeStart     = epochInput['timeStart']
+        timeEnd       = epochInput['timeEnd']
+        epochStepSize = epochInput['epochStepSize']
+
+        epochStepSize_inSamples = int(np.floor(epochStepSize * srate))
+
+        if (timeStart > timeEnd) or ((timeEnd - timeStart) < epochLen):
+            raise Exception("Inputs for timeStart and timeEnd are incorrect! (either timeStart is after timeEnd, or the difference between them is less then epochLen)")
+
+        if np.isinf(timeStart) or (timeStart > (measLenInSec - epochLen)):
+            raise Exception("The input for timeStart is incorrect! (either infinity or too close to end of recording)")
+
+        timeStart_inSamples = np.argmin(np.abs(timestamps - (timeStart + timestamps[0])))
+        if timeStart_inSamples < 0:
+            print('Time start cannot be before the first sample! Setting to first sample')
+            timeStart_inSamples = 0
+
+        if np.isinf(timeEnd):
+            timeEnd_inSamples = copy.deepcopy(fullSamplesLen)
+        else:
+            timeEnd_inSamples = np.argmin(np.abs(timestamps - (timeEnd + timestamps[0]))) + 1
+            if timeEnd_inSamples > fullSamplesLen:
+                print('Time end cannot be after the last sample! Setting to the last sample')
+                timeEnd_inSamples = copy.deepcopy(fullSamplesLen)
+
+        epochStartInds = np.arange(timeStart_inSamples, timeEnd_inSamples-epochLen_inSamples+1, epochStepSize_inSamples)
+
+    elif 'epochStarts' in epochInput:
+        epochStarts = epochInput['epochStarts']
+        if np.isscalar(epochStarts):
+            epochStarts = np.array([epochStarts])
+        
+        epochStartInds = np.zeros(len(epochStarts),dtype=int)
+
+        for epochi in range(len(epochStarts)):
+            epochStartInds[epochi] = np.argmin(np.abs(timestamps - epochStarts[epochi]))
+
+        if any(epochStarts > (timestamps[-1] - epochLen)) and ((len(timestamps) - epochStartInds[-1]) < epochLen_inSamples):
+            raise Exception("At least one of the epochStarts is incorrect! (is too close to the end of the recording)")
+    
+    else: 
+        raise Exception("False input for parameter 'epochInputs'!")
+  
+
+    numEpochs = len(epochStartInds)
+
+    timestampEpochs = [0]*numEpochs
+    exactEpochStartTimestamps = np.zeros(numEpochs)
+    dopplerEpochs = [0]*numEpochs
+
+    if not parallelize:
+        for epochi,currEpochStart in enumerate(epochStartInds):
+            currEpochEnd = currEpochStart + epochLen_inSamples
+
+            timestampEpochs[epochi] = timestamps[currEpochStart:currEpochEnd]
+            exactEpochStartTimestamps[epochi] = timestampEpochs[epochi][0]
+
+            dataCompEpoch = deinterleaveRadarData(rawInputData[currEpochStart:currEpochEnd],TX,RX)
+
+            if useHann:
+                dataCompEpoch = dataCompEpoch * np.hanning(radarSettings['radar_adcsamp_num'])
+            
+            rangeDataEpoch = np.fft.fft(dataCompEpoch)
+
+            rangeDataEpoch = rangeDataEpoch.transpose(0,2,1)
+            rangeDataEpoch = rangeDataEpoch * np.hanning(rangeDataEpoch.shape[-1])
+            dopplerEpoch = np.fft.fft(rangeDataEpoch)
+            dopplerEpoch = np.square(np.absolute(dopplerEpoch))  # Magnitude Calculation
+            dopplerEpochs[epochi] = dopplerEpoch
+    else:
+        def process_epochs(currEpochStart):
+            currEpochEnd = currEpochStart + epochLen_inSamples
+
+            curr_timestampEpoch = timestamps[currEpochStart:currEpochEnd]
+            curr_exactEpochStartTimestamp = curr_timestampEpoch[0]
+
+            dataCompEpoch = deinterleaveRadarData(rawInputData[currEpochStart:currEpochEnd],TX,RX)
+
+            if useHann:
+                dataCompEpoch = dataCompEpoch * np.hanning(radarSettings['radar_adcsamp_num'])
+            
+            rangeDataEpoch = np.fft.fft(dataCompEpoch)
+
+            rangeDataEpoch = rangeDataEpoch.transpose(0,2,1)
+            rangeDataEpoch = rangeDataEpoch * np.hanning(rangeDataEpoch.shape[-1])
+            curr_dopplerEpoch = np.fft.fft(rangeDataEpoch)
+            curr_dopplerEpoch = np.square(np.absolute(curr_dopplerEpoch))  # Magnitude Calculation
+
+            return curr_timestampEpoch, curr_dopplerEpoch, curr_exactEpochStartTimestamp
+
+        # create blocks of epochs to parallelize:
+        for epochBlocki in range(0,len(epochStartInds),parallel_blockLen):
+            print('Starting new epoch block for doppler epochs, starting epochind: ',epochBlocki)
+            curr_epoch_inds = np.arange(epochBlocki, np.min((len(epochStartInds), epochBlocki+parallel_blockLen)))
+
+            parallel_output = Parallel(n_jobs=parallel_workers, backend='loky', verbose=parallel_verboseLvl)(
+                delayed(process_epochs)(currEpochStart) for currEpochStart in epochStartInds[curr_epoch_inds]
+            )
+            for currInd,epochi in enumerate(curr_epoch_inds):
+                timestampEpochs[epochi] = parallel_output[currInd][0]
+                dopplerEpochs[epochi] = parallel_output[currInd][1]
+                exactEpochStartTimestamps[epochi] = parallel_output[currInd][2]
+
+    return timestampEpochs,dopplerEpochs,exactEpochStartTimestamps,np.round(exactEpochStartTimestamps-timestamps[0]).astype("int")
+
 def readFullRefData(measurement_data,sensor_idx):
     """
     Read full reference sensor data for the specified sensor index.

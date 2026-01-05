@@ -4,7 +4,13 @@ __Contact:__ benedek.ernoe.szmola@uni-oldenburg.de
 
 This repository contains the scripts which were used for the analyses presented in the manuscript. The scripts to make the plots are also included.
 
+## Associated publication:
+Szmola, B.; Hornig, L.; Vox, J.P.; Liman, T.; Radeloff, A.; Kollmeier, B.; Wolf, K.I.; Witt, K. Radar Multiple Bin Selection for Breathing and Heart Rate Monitoring in Acute Stroke Patients in a Clinical Setting. Sensors 2026, 26, 251. https://doi.org/10.3390/s26010251
+
 ## Updates:
+- Update 2 05.01.2026
+    - The repository has been updated to reflect the final modifications of the publication.
+    - The link to the published article has been added.
 - Update 1 18.12.2025
     - This repository has now been updated according to the revisions to the paper.
 

@@ -118,7 +118,7 @@ def make_custom_BlandAltman_plot(sensor1data_dict,sensor2data_dict,typeStr,saveF
         print(f'% of points below CI {ratio_belowCI*100:.2f} , and above CI {ratio_aboveCI*100:.2f}')
         
         ax[binSel_ind].set_title(
-            f"Bland\u2013Altman Plot: PSG vs Radar {"Breathing" if typeStr=="BR" else "Heart"} Rates \n {"Single" if binSelType=="SBS" else "Multiple"} Bin Selection",
+            f"Bland\u2013Altman Plot: PSG vs. Radar {"Breathing" if typeStr=="BR" else "Heart"} Rates \n {"Single" if binSelType=="SBS" else "Multiple"} Bin Selection",
             fontsize=28
         )
 

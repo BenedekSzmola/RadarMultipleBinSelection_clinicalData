@@ -306,7 +306,7 @@ for recID in recIDList:
     
     ax[0].legend(loc="upper right")
 
-    ax[1].plot(timeStarts, psgData - radarData,'o',markersize=3,fillstyle="none",label=f"PSG - Radar")
+    ax[1].plot(timeStarts, psgData - radarData,'o',markersize=3,fillstyle="none",label=f"PSG \u2212 Radar")
     ax[1].plot([timeStarts[0],timeStarts[-1]+timeWinLen],[0,0],'k--',label="Diff = 0")
     if typeStr == "BR":
         ax[1].set_title(f"Difference of PSG and Radar Breathing Rates (MAPE = {mape:.2f} %)")
@@ -322,7 +322,7 @@ for recID in recIDList:
 
     outOfBoundsBot = np.where((psgData - radarData) < -5)[0]
     if any(outOfBoundsBot):
-        ax[1].plot(timeStarts[outOfBoundsBot],np.zeros(len(outOfBoundsBot))-4.7,'rv',label="Diff < -5")
+        ax[1].plot(timeStarts[outOfBoundsBot],np.zeros(len(outOfBoundsBot))-4.7,'rv',label=f"Diff < \u22125")
 
     if doMotionParamThr:
         ax[1].fill_between(
